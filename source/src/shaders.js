@@ -691,3 +691,61 @@ fn sat3(x: vec3f) -> vec3f { return clamp(x, vec3f(0.), vec3f(1.)); }
   return vec4f(c + n / 255., 1.);
 }
 `;
+
+// ---------------------------------------------------------------- the rift: a tear in the air that leads to the forest
+// One camera-facing quad standing at RIFT, drawn the way the additive sprites are: depth-tested, not depth-writing,
+// no vertex or instance buffer. A vertical seam of light, tapering to a point at both ends, with wavering veils of
+// heat on either side of it. Everything moves as a closed form of g.cam.w, so the CPU does nothing per frame.
+// No frame and no architecture: it is the green of the forest on the other side, against the orange of everything here.
+// On the east bank of the river, 19 m ahead of viewpoint 1 (the start) and to the right of its line of sight:
+// 7 m clear of the lava, on the strip CLEARS keeps free of terraces, 17 m from the nearest outcrop.
+// main.js stands it on the ground under it (RIFT[1]) and only then compiles this, which is why it is a function.
+const RIFT = [51, -44.4, 52];              // centre: x, y (set at load: the ground + RIFT_UP), z
+const RIFT_UP = 3.6;                         // height of the centre above the ground
+const RIFT_HW = 2.6, RIFT_HH = 5;            // half-width and half-height of the quad (m): the seam itself is far thinner
+const rfN = (v) => '(' + v.toFixed(2) + ')'; // a WGSL float literal, in brackets: the minifier would join "a - -b"
+const W_RIFT = () => S_B + /*wgsl*/`
+const RF_P = vec3f(${rfN(RIFT[0])}, ${rfN(RIFT[1])}, ${rfN(RIFT[2])});
+const RF_HW = ${rfN(RIFT_HW)};
+const RF_HH = ${rfN(RIFT_HH)};
+const RF_CORE = vec3f(5., 11., 6.5);       // the seam itself (HDR: the bloom chain picks it up)
+const RF_HALO = vec3f(.25, 2.4, .9);       // the glow and the shimmering veils around it
+const RF_HAZE = .5;                          // share of the haze extinction it suffers (1 = like a lit surface)
+struct RFO { @builtin(position) cp: vec4f, @location(0) uv: vec2f, @location(1) wp: vec3f };
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> RFO {
+  var o: RFO;
+  let q = vec2f(f32(vi & 1u), f32(vi >> 1u)) * 2. - 1.;
+  // g.right is horizontal, so the quad turns to the camera about the vertical and the seam stays upright
+  let wp = RF_P + g.right.xyz * (q.x * RF_HW) + vec3f(0., q.y * RF_HH, 0.);
+  o.uv = q;
+  o.wp = wp;
+  o.cp = g.vp * vec4f(wp, 1.);
+  return o;
+}
+@fragment fn fs(i: RFO) -> @location(0) vec4f {
+  let t = g.cam.w;
+  let x = i.uv.x * RF_HW; let y = i.uv.y * RF_HH;
+  // 1 at mid-height, 0 at the two tips
+  let tp = max(1. - i.uv.y * i.uv.y, 0.);
+  let env = tp * sqrt(tp);
+  // the line of the tear wanders sideways, slowly and then in a fast small jitter
+  let cx = .16 * sin(y * 1.3 + t * .7) + .09 * sin(y * 3.7 - t * 1.9) + .04 * sin(y * 9.1 + t * 4.3);
+  let dx = abs(x - cx);
+  // the seam: a few centimetres wide, breathing, with a ripple running down it
+  let w = (.04 + .1 * env) * (.8 + .2 * sin(t * 1.7) + .12 * sin(y * 6. - t * 5.));
+  let core = exp(0. - dx * dx / (w * w)) * ss(0., .12, tp);
+  let halo = exp(0. - dx / (.5 * env + .03)) * env;
+  // heat shimmer: two sets of slanting bands that climb at different speeds and bend each other, so the veils
+  // never repeat and have gaps between them
+  let s1 = sin(y * 2.9 - t * 3.5 + 2.2 * sin(x * 2.7 + t * 1.1) + x * 1.9);
+  let s2 = sin(y * 6.7 - t * 6. + 1.6 * sin(y * 1.9 - x * 3.3 + t * .8) - x * 4.1);
+  let sh = (.55 + .45 * s1) * (.55 + .45 * s2);
+  let veil = exp(0. - dx / (1.1 * env + .03)) * env * sh;
+  // nothing reaches the border of the quad, so it has no outline
+  let edge = (1. - ss(.5, 1., abs(i.uv.x))) * (1. - ss(.8, 1., abs(i.uv.y)));
+  let v = i.wp - g.cam.xyz; let d = max(length(v), 1e-3);
+  let T = exp(0. - RF_HAZE * hzt(g.cam.xyz, v / d, d)) * ss(FARD, FARD * .7, d);
+  let c = RF_CORE * core + RF_HALO * (halo * .6 + veil * .8);
+  return fin(c * (edge * T * (.85 + .15 * sin(t * 2.3 + y * .8))));
+}
+`;
