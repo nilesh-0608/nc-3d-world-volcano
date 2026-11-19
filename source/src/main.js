@@ -84,7 +84,7 @@ const scenePipe = (m, vsE, fsE, buffers, o = {}) => device.createRenderPipeline(
   vertex: { module: m, entryPoint: vsE, buffers, constants: o.constants },
   fragment: { module: m, entryPoint: fsE, targets: [{ format: HDR, blend: o.blend }] },
   primitive: { topology: o.strip ? 'triangle-strip' : 'triangle-list', cullMode: o.cull || 'none' },
-  depthStencil: { format: DEPTH, depthWriteEnabled: !o.blend, depthCompare: 'greater' }, multisample: { count: AA } });
+  depthStencil: { format: DEPTH, depthWriteEnabled: o.zw || !o.blend, depthCompare: 'greater' }, multisample: { count: AA } }); // zw: a blended pipeline that writes depth all the same (the door)
 const shadowPipe = (m, vsE, buffers, o = {}) => device.createRenderPipeline({ layout: pl0,
   vertex: { module: m, entryPoint: vsE, buffers, constants: o.constants },
   primitive: { topology: o.strip ? 'triangle-strip' : 'triangle-list', cullMode: o.cull || 'none' },
@@ -98,6 +98,8 @@ const pTerrSh = shadowPipe(mSolid, 'vs', [vbSolid, ibSolid], { cull: 'front' });
 // embers: procedural billboards, additive, no vertex or instance buffers at all (see W_MOTE in shaders.js)
 const MOTEN = LV > 1 ? 900 : LV ? 1700 : 2800;
 const ADD = { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } };
+// ordinary alpha blending, premultiplied: what is drawn with it covers what is behind it, and can be darker than it
+const OVER = { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } };
 const pMote = scenePipe(mod(W_MOTE), 'vs', 'fs', [], { strip: true, blend: ADD });
 
 const mWater = mod(W_WATER);
@@ -261,7 +263,8 @@ for (const p of POSES) flyPts.push([p[0], -40, p[2]]);
 await say('Flooding the crater…', 0.73, 2500);
 const Wd = makeWorld(D, T, flyPts, POSES);
 for (const p of POSES) p[1] = min(p[1] + Wd.gy(p[0], p[2]), 2.4); // 2.4: the ceiling frame() holds the camera under
-// The rift (W_RIFT in shaders.js) is stood on the ground under it, then compiled with that height in it. Inside an
+// The rift (W_RIFT in shaders.js: now a door, fixed in the world) is stood on the ground under it, then compiled with
+// that height in it. Alpha-blended, and it writes depth: it is a window, so what is behind it is hidden. Inside an
 // error scope: a mistake in its shader must cost the rift and nothing else, and an invalid pipeline used in the
 // scene pass would lose the whole frame. With pRift null it is neither drawn nor a way out (see frame()).
 let pRift = null;
@@ -270,7 +273,7 @@ let pRift = null;
   RIFT[1] = (y > -53 && y < -38 ? y : -48) + RIFT_UP;
   let p = null, err = null;
   device.pushErrorScope('validation');
-  try { p = scenePipe(mod(W_RIFT()), 'vs', 'fs', [], { strip: true, blend: ADD }); } catch (e) { err = e; }
+  try { p = scenePipe(mod(W_RIFT()), 'vs', 'fs', [], { strip: true, blend: OVER, zw: true }); } catch (e) { err = e; }
   try { err = await device.popErrorScope() || err; } catch (e) { err = e; }
   if (err) console.warn('rift: not drawn', err.message || err); else pRift = p;
 }
@@ -447,10 +450,12 @@ function render() {
   r.setVertexBuffer(0, vbProps); r.setIndexBuffer(ibProps, 'uint32');
   for (const d of PROPD) if (d.count) r.drawIndexed(d.n, d.count, d.i0, d.v0, d.first);
   r.setPipeline(pBack); r.draw(4);
+  // the door (the rift): the opening, then its two jambs and its lintel. After everything solid, which hides it where
+  // it stands in front, and before the embers: it writes depth, so those behind it are hidden and those
+  // in front of it are drawn over it
+  if (pRift) { r.setPipeline(pRift); r.draw(4, 4); }
   // embers last: additive, so they must go after the opaque sky quad, which does not blend
   r.setPipeline(pMote); r.draw(4, MOTEN);
-  // the rift, after the embers: additive as they are, and like them hidden by rock in front of it
-  if (pRift) { r.setPipeline(pRift); r.draw(4); }
   r.end();
   // bloom
   for (let i = 0; i < bloomPass.length; i++) {

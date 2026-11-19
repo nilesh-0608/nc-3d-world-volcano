@@ -692,60 +692,175 @@ fn sat3(x: vec3f) -> vec3f { return clamp(x, vec3f(0.), vec3f(1.)); }
 }
 `;
 
-// ---------------------------------------------------------------- the rift: a tear in the air that leads to the forest
-// One camera-facing quad standing at RIFT, drawn the way the additive sprites are: depth-tested, not depth-writing,
-// no vertex or instance buffer. A vertical seam of light, tapering to a point at both ends, with wavering veils of
-// heat on either side of it. Everything moves as a closed form of g.cam.w, so the CPU does nothing per frame.
-// No frame and no architecture: it is the green of the forest on the other side, against the orange of everything here.
+// ---------------------------------------------------------------- the rift: a doorway that leads to the forest
+// It was a seam of light on a camera-facing quad; it is now a door standing at RIFT (THE DOOR, below), and through
+// its opening the other world is seen. RIFT and the three numbers under it are what main.js navigates by.
 // On the east bank of the river, 19 m ahead of viewpoint 1 (the start) and to the right of its line of sight:
 // 7 m clear of the lava, on the strip CLEARS keeps free of terraces, 17 m from the nearest outcrop.
 // main.js stands it on the ground under it (RIFT[1]) and only then compiles this, which is why it is a function.
 const RIFT = [51, -44.4, 52];              // centre: x, y (set at load: the ground + RIFT_UP), z
-const RIFT_UP = 3.6;                         // height of the centre above the ground
-const RIFT_HW = 2.6, RIFT_HH = 5;            // half-width and half-height of the quad (m): the seam itself is far thinner
+const RIFT_UP = 3.6;                         // height of the centre above the ground: of the trigger volume, that is
+const RIFT_HW = 2.6, RIFT_HH = 5;            // RIFT_HH: half-height of the trigger volume (m). RIFT_HW: unused since the door
 const rfN = (v) => '(' + v.toFixed(2) + ')'; // a WGSL float literal, in brackets: the minifier would join "a - -b"
+const rfV = (v) => '(' + v.toFixed(5) + ')'; // the same, fine enough for a unit vector
+// THE DOOR: what is drawn at RIFT. A flat rectangular opening standing on the ground, fixed in the world (it does
+// not turn to the camera): DOOR_HW x DOOR_H is the opening, and its normal points from RIFT at DOOR_AT, which is
+// viewpoint 1, so the visitor who starts there sees it square on. It can be walked round, and is a way through
+// from both faces. RIFT_HW, RIFT_HH and RIFT_UP above are no longer drawn: they are the trigger volume and the
+// arrival height main.js uses, and stay as they were.
+const DOOR_HW = 2, DOOR_H = 6.6;             // half-width and height of the opening (m)
+const DOOR_SINK = .6;                        // how far the quad goes on below the ground, so no slope shows under it
+const DOOR_AT = [47, 71];                    // x, z of the point the door faces: viewpoint 1 (POSES[0] in main.js)
+const doorN = () => { const x = DOOR_AT[0] - RIFT[0], z = DOOR_AT[1] - RIFT[2], l = Math.hypot(x, z) || 1; return [x / l, z / l]; };
+// One draw of 4 instances, no vertex or instance buffer: instance 0 is the opening, 1-3 are the two jambs and the
+// lintel, each a thin strip turned to the camera about its own axis -- so the door is still a line of light when it
+// is seen edge-on and the opening has no width at all. Alpha-blended (premultiplied) and depth-WRITING: it is a
+// window, not a light. What the opening shows is the other world, built from nothing but the view ray:
+//   the ray from the eye through the fragment is taken into the door's own frame (x along the door, y up, z into
+//   it) and traced into an imaginary space behind the opening. Every part of that space is found by intersecting
+//   the ray with something: the far background with nothing (direction alone, like a sky), the floor with the plane
+//   y = 0, each row of silhouettes with a plane z = its depth. A point at depth z is seen at o + k z, where o is
+//   the fragment's place in the opening and k the slope of the ray, so near rows slide across the opening faster
+//   than far ones as the eye moves, and the far background only turns: the parallax of a real window.
+// Everything moves as a closed form of g.cam.w, so the CPU does nothing per frame.
 const W_RIFT = () => S_B + /*wgsl*/`
-const RF_P = vec3f(${rfN(RIFT[0])}, ${rfN(RIFT[1])}, ${rfN(RIFT[2])});
-const RF_HW = ${rfN(RIFT_HW)};
-const RF_HH = ${rfN(RIFT_HH)};
-const RF_CORE = vec3f(5., 11., 6.5);       // the seam itself (HDR: the bloom chain picks it up)
-const RF_HALO = vec3f(.25, 2.4, .9);       // the glow and the shimmering veils around it
-const RF_HAZE = .5;                          // share of the haze extinction it suffers (1 = like a lit surface)
-struct RFO { @builtin(position) cp: vec4f, @location(0) uv: vec2f, @location(1) wp: vec3f };
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> RFO {
+const RF_B = vec3f(${rfN(RIFT[0])}, ${rfN(RIFT[1] - RIFT_UP)}, ${rfN(RIFT[2])});   // middle of the threshold, on the ground
+const RF_N = vec3f(${rfV(doorN()[0])}, 0., ${rfV(doorN()[1])});                    // the way the door faces
+const RF_R = vec3f(${rfV(doorN()[1])}, 0., ${rfV(-doorN()[0])});                   // along the door
+const RF_HW = ${rfN(DOOR_HW)};
+const RF_H = ${rfN(DOOR_H)};
+const RF_SINK = ${rfN(DOOR_SINK)};
+const RF_RIMW = .07;                         // half-width of the edge strips (m); never under 1.5 pixels
+const RF_SOLID = 1.;                         // opacity of the view in the opening: under 1 the real scene shows through it
+const RF_HAZE = .25;                         // share of the host world's haze the door suffers (1 = like a lit surface)
+fn rfh(n: f32) -> f32 { return fract(sin(n * 127.1 + 3.7) * 43758.5453); }
+fn rfh2(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453); }
+fn rfvn(p: vec2f) -> f32 {
+  let i = floor(p); let f = fract(p); let u = f * f * (3. - 2. * f);
+  return mix(mix(rfh2(i), rfh2(i + vec2f(1., 0.)), u.x), mix(rfh2(i + vec2f(0., 1.)), rfh2(i + vec2f(1., 1.)), u.x), u.y);
+}
+fn rffb(p: vec2f) -> f32 { return .55 * rfvn(p) + .3 * rfvn(p * 2.1 + 7.) + .15 * rfvn(p * 4.3 + 19.); }
+// sparks or pollen on the plane at depth z: one point to a cell, drifting by dv, each with its own twinkle
+fn rfDot(o: vec2f, k: vec2f, m: vec3f, z: f32, sc: f32, dv: vec2f, r: f32) -> f32 {
+  let p = (o + k * z) * sc + dv;
+  let id = floor(p); let f = fract(p) - .5;
+  let q = f - (vec2f(rfh2(id), rfh2(id + 5.3)) - .5) * .7;
+  let aa = m.z * (m.y + z / m.x) * sc;
+  let tw = .5 + .5 * sin(g.cam.w * (1. + 2. * rfh2(id + 9.1)) + 6.28 * rfh2(id + 2.7));
+  return (1. - ss(r, r + aa + .004, length(q))) * tw * step(.45, rfh2(id + 1.9)) * min(1., r / (aa + 1e-4));
+}
+// ---- the other side: the rainforest. Green light filtered by the canopy, trunks going back into the haze, a shaft
+// of sun, a dim floor. No orange anywhere: against the lava it is the one cool, dark, green thing in the basin.
+const RF_RIM = vec3f(.42, .8, .5);           // the edge strips: pale leaf green, under 1: an edge, not a light
+const RF_HZ = vec3f(.19, .32, .11);          // the haze every distance fades into
+const RF_FD = .05;                           // its extinction per metre
+// one row of trees on the plane at depth z, laid over c. m = (ray z, eye-to-door distance, angle of a pixel)
+fn rfRow(c: vec3f, o: vec2f, k: vec2f, m: vec3f, z: f32, sd: f32) -> vec3f {
+  let p = o + k * z;
+  if (p.y < 0.) { return c; }
+  let aa = m.z * (m.y + z / m.x) / m.x + .002;
+  let sp = 2.3 + 1.6 * rfh(sd);
+  let u = p.x / sp + sd * 13.7;
+  let id = floor(u);
+  let h = rfh(id * 1.31 + sd * 57.);
+  // the trunk: 30 to 90 cm through, flaring into buttresses at the foot
+  let r = (.15 + .3 * rfh(id + sd * 91.)) * (1. + .9 * exp(-p.y * 1.1));
+  let cx = (fract(u) - .5 - (h - .5) * .4) * sp;
+  let tm = step(.3, h) * (1. - ss(r - aa, r + aa, abs(cx)));
+  let sh = .5 + .5 * clamp(cx / r, -1., 1.);
+  var col = mix(vec3f(.012, .016, .008), vec3f(.075, .105, .035), sh * sh) * (.7 + .3 * ss(0., 6., p.y));
+  // undergrowth along its foot: a ragged line of fern
+  let bh = .3 + .9 * rfvn(vec2f(p.x * .9 + sd * 31., sd)) + .25 * rfvn(vec2f(p.x * 4.1, sd + 3.));
+  let bm = 1. - ss(bh - aa - .03, bh + aa + .03, p.y);
+  col = mix(col, vec3f(.02, .05, .012) * (.5 + .9 * sat(p.y / bh)), bm);
+  return mix(c, mix(RF_HZ, col, exp(-RF_FD * z / m.x)), max(tm, bm));
+}
+fn rfIn(o: vec2f, k: vec2f, ez: f32, dc: f32, t: f32) -> vec3f {
+  let m = vec3f(ez, dc, 2. * g.up.w / max(g.res.y, 1.));
+  // FAR, by direction alone: the haze, brightest a little above eye level, with the ghosts of the furthest trunks
+  var c = RF_HZ * (.5 + .8 * exp(-abs(k.y - .12) * 3.5));
+  c *= 1. - .3 * ss(.5, .72, rfvn(vec2f(k.x * 34., 2.))) * ss(.9, .1, abs(k.y));
+  if (k.y > .001) {
+    // the canopy: a ceiling 13 m up, dark leaves with holes of sky in them that drift a little
+    let zc = min((13. - o.y) / k.y, 300.);
+    let cp = vec2f(o.x + k.x * zc, zc);
+    let hole = ss(.56, .7, rffb(cp * .22 + vec2f(.03 * t, 0.)));
+    let leaf = vec3f(.018, .05, .014) * (.5 + rfvn(cp * 1.3));
+    c = mix(c, mix(leaf, vec3f(.8, 1.1, .5), hole), exp(-RF_FD * .7 * zc / ez));
+  } else if (k.y < -.001) {
+    // the floor: litter and moss, flecks of sun, and the pool of light where the shaft lands
+    let zf = min(o.y / (-k.y), 300.);
+    let fp = vec2f(o.x + k.x * zf, zf);
+    var fc = mix(vec3f(.014, .02, .009), vec3f(.035, .06, .02), rffb(fp * .35));
+    fc += vec3f(.42, .45, .18) * ss(.62, .8, rffb(fp * .5 + 11.));
+    let dq = fp - vec2f(1.2, 9.);
+    fc += vec3f(1., .95, .5) * exp(-dot(dq, dq) / 2.2);
+    c = mix(c, fc, exp(-RF_FD * zf / ez));
+  }
+  c = rfRow(c, o, k, m, 34., 5.);
+  c = rfRow(c, o, k, m, 22., 4.);
+  c = rfRow(c, o, k, m, 14., 3.);
+  // the shaft of sun: a slanting slab of lit haze 9 m in, between the rows, breathing
+  let ps = o + k * 9.;
+  let b = ps.x - 1.2 + ps.y * .32;
+  let sI = exp(-b * b / .8) * ss(-.3, .6, ps.y) * (.75 + .25 * sin(t * .6 + ps.y * .7)) * (.65 + .35 * rfvn(vec2f(b * 3., ps.y * .4 - t * .15)));
+  c += vec3f(.7, .66, .34) * sI * exp(-RF_FD * 9. / ez);
+  c = rfRow(c, o, k, m, 8., 2.);
+  c += vec3f(.5, .6, .3) * rfDot(o, k, m, 6., 1.3, vec2f(.15 * sin(t * .3), .05 * t), .03) * exp(-RF_FD * 6. / ez);
+  c = rfRow(c, o, k, m, 4.5, 1.);
+  return c;
+}
+struct RFO { @builtin(position) cp: vec4f, @location(0) uv: vec2f, @location(1) wp: vec3f, @location(2) @interpolate(flat) k: f32 };
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> RFO {
   var o: RFO;
-  let q = vec2f(f32(vi & 1u), f32(vi >> 1u)) * 2. - 1.;
-  // g.right is horizontal, so the quad turns to the camera about the vertical and the seam stays upright
-  let wp = RF_P + g.right.xyz * (q.x * RF_HW) + vec3f(0., q.y * RF_HH, 0.);
-  o.uv = q;
+  let q = vec2f(f32(vi & 1u), f32(vi >> 1u));
+  var wp: vec3f;
+  if (ii == 0u) {
+    // the opening: fixed in the world. uv = metres along the door and above the ground
+    let l = vec2f((q.x * 2. - 1.) * RF_HW, mix(-RF_SINK, RF_H, q.y));
+    wp = RF_B + RF_R * l.x + vec3f(0., l.y, 0.);
+    o.uv = l; o.k = 0.;
+  } else {
+    // a jamb (1, 2) or the lintel (3): a strip along the segment a-b, turned to the camera about that segment
+    var a = vec2f(-RF_HW, -RF_SINK); var b = vec2f(-RF_HW, RF_H);
+    if (ii == 2u) { a.x = RF_HW; b.x = RF_HW; }
+    if (ii == 3u) { a.y = RF_H; b.x = RF_HW; }
+    let wa = RF_B + RF_R * a.x + vec3f(0., a.y, 0.);
+    let wb = RF_B + RF_R * b.x + vec3f(0., b.y, 0.);
+    let ax = normalize(wb - wa);
+    let p = mix(wa, wb, q.y);
+    let tc = g.cam.xyz - p; let dc = max(length(tc), 1e-3); let to = tc / dc;
+    let hw = max(RF_RIMW, dc * 3. * g.up.w / max(g.res.y, 1.));
+    let cr = cross(ax, to); let sd = cr / max(length(cr), 1e-4);
+    // 8 cm towards the eye: in front of the opening it frames, which has written its depth
+    wp = p + ax * ((q.y * 2. - 1.) * hw) + sd * ((q.x * 2. - 1.) * hw) + to * min(.08, dc * .3);
+    o.uv = vec2f(q.x * 2. - 1., q.y); o.k = 1.;
+  }
   o.wp = wp;
   o.cp = g.vp * vec4f(wp, 1.);
   return o;
 }
 @fragment fn fs(i: RFO) -> @location(0) vec4f {
-  let t = g.cam.w;
-  let x = i.uv.x * RF_HW; let y = i.uv.y * RF_HH;
-  // 1 at mid-height, 0 at the two tips
-  let tp = max(1. - i.uv.y * i.uv.y, 0.);
-  let env = tp * sqrt(tp);
-  // the line of the tear wanders sideways, slowly and then in a fast small jitter
-  let cx = .16 * sin(y * 1.3 + t * .7) + .09 * sin(y * 3.7 - t * 1.9) + .04 * sin(y * 9.1 + t * 4.3);
-  let dx = abs(x - cx);
-  // the seam: a few centimetres wide, breathing, with a ripple running down it
-  let w = (.04 + .1 * env) * (.8 + .2 * sin(t * 1.7) + .12 * sin(y * 6. - t * 5.));
-  let core = exp(0. - dx * dx / (w * w)) * ss(0., .12, tp);
-  let halo = exp(0. - dx / (.5 * env + .03)) * env;
-  // heat shimmer: two sets of slanting bands that climb at different speeds and bend each other, so the veils
-  // never repeat and have gaps between them
-  let s1 = sin(y * 2.9 - t * 3.5 + 2.2 * sin(x * 2.7 + t * 1.1) + x * 1.9);
-  let s2 = sin(y * 6.7 - t * 6. + 1.6 * sin(y * 1.9 - x * 3.3 + t * .8) - x * 4.1);
-  let sh = (.55 + .45 * s1) * (.55 + .45 * s2);
-  let veil = exp(0. - dx / (1.1 * env + .03)) * env * sh;
-  // nothing reaches the border of the quad, so it has no outline
-  let edge = (1. - ss(.5, 1., abs(i.uv.x))) * (1. - ss(.8, 1., abs(i.uv.y)));
-  let v = i.wp - g.cam.xyz; let d = max(length(v), 1e-3);
-  let T = exp(0. - RF_HAZE * hzt(g.cam.xyz, v / d, d)) * ss(FARD, FARD * .7, d);
-  let c = RF_CORE * core + RF_HALO * (halo * .6 + veil * .8);
-  return fin(c * (edge * T * (.85 + .15 * sin(t * 2.3 + y * .8))));
+  let v = i.wp - g.cam.xyz; let d = max(length(v), 1e-3); let rd = v / d;
+  var c = RF_RIM; var a = 1.;
+  if (i.k > .5) {
+    // the edge: brightest along its middle, gone at its sides
+    a = 1. - i.uv.x * i.uv.x; a *= a;
+  } else {
+    // which face is the eye on? Seen from behind, the door's frame is turned half round, so both faces are ways in
+    let s = select(-1., 1., dot(g.cam.xyz - RF_B, RF_N) >= 0.);
+    // the view ray in the door's frame, z into the door. Never quite along the door: at a grazing angle the
+    // path to every depth is long, and the haze of the other world takes it all
+    let ez = max(-s * dot(rd, RF_N), .04);
+    let k = vec2f(s * dot(rd, RF_R), rd.y) / ez;
+    c = rfIn(vec2f(s * i.uv.x, max(i.uv.y, 0.)), k, ez, d, g.cam.w);
+    // the reveal: the view darkens into the frame, which gives the opening an edge of its own
+    c *= .6 + .4 * ss(0., .45, min(RF_HW - abs(i.uv.x), RF_H - i.uv.y));
+    a = RF_SOLID;
+  }
+  // the haze of THIS world between the eye and the door: part of it close by, all of it far off
+  c = mix(c, fogD(c, i.wp, FARD), mix(RF_HAZE, 1., ss(40., 110., d)));
+  c = min(max(c, vec3f(0.)), vec3f(40.));
+  return vec4f(c * a, a);
 }
 `;
