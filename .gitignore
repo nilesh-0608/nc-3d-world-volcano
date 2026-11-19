@@ -1,0 +1,9 @@
+# Build scratch. index.html is NOT ignored: it is the published artifact and is committed deliberately.
+node_modules/
+
+# `npm run build:dev` output: the unminified bundle plus the development tools in src/dev.js
+dev.html
+
+# tooling scratch
+.impeccable/
+*.log
